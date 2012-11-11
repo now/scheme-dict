@@ -1,0 +1,43 @@
+body {
+	font-family: sans-serif;
+}
+
+a.toc-backref {
+	text-decoration: none;
+	color: black;
+}
+
+h1.title {
+	text-align: center;
+}
+
+h1 + p, h2 + p, h3 + p {
+	text-indent: 2em;
+}
+
+p {
+	text-align: justify;
+}
+
+.topic-title {
+	font-weight: bold;
+}
+
+.docinfo-name {
+	text-align: right;
+}
+
+pre.literal-block, pre.doctest-block {
+	margin-left: 2em;
+	margin-right: 2em;
+	background-color: #eeeeee;
+}
+
+
+tt {
+	background-color: #eeeeee;
+}
+
+.citation .label {
+	padding-right: 0.5em;
+}

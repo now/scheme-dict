@@ -1,0 +1,539 @@
+=========================
+A DICT Library for Scheme
+=========================
+
+
+
+:Author: Nikolai Weibull
+:Date: 2003-12-11
+:Revision: 1.0
+
+
+
+.. sectnum::
+.. contents:: Table of Contents
+
+
+Introduction
+============
+
+
+When writing documents, such as this one, it is often necessary to look up the
+precise meaning or spelling of a word.  The latter problem can often be solved
+by using a word processor such as `Open Office`_, editor, such as Vim_, or
+external spelling checking software such as aspell_.  The earlier is often not
+as easily done.  There does, however, exists a protocol, defined in [RFC2229]_
+that enables this kind of lookup.  There also exists software that utilize this
+protocol to achieve the desired effect of querying a collection of dictionary
+databases for the precise meaning of a word.  These will be discussed in the
+section called `Previous Implementations`_.
+
+My motivation for writing a library that implements the client side of this
+protocol, and an application that utilizes this library, was mostly out of
+general need for such a utility.  As will be discussed in the following
+chapter, there does exist useful utilities already.  They do, however, all have
+their downsides, which I felt warranted a new one.  As is usual in the Open
+Source Culture, I have tried modeling the client after existing ones, while
+trying to improve where necessity or usefulness warrants this kind of
+enhancement, while abiding to the rules of KISS.
+
+A second motivation was that I wanted to give the Scheme [R5RS]_ programming
+language a try, and thought that a rather small, yet possibly entertaining
+project such as this one, would be a good target for my investigations into the
+subject.
+
+.. _Open Office: http://www.openoffice.org/
+.. _Vim: http://www.vim.org/
+.. _aspell: http://aspell.sourceforge.net/
+.. _Scheme: http://www.schemers.org/
+
+
+
+Previous Implementations
+========================
+
+In knowing our future, we must look at our past.  In software development, a
+lot is to be learned by looking at previous successes and failings.  Therefore,
+before writing the target library and client, a couple of existing
+implementations of DICT protocol clients were surveyed.  This was mainly done
+to get familiar with the protocol, beyond the specification level, and to see
+what features, both of the library and the client, that would be required for
+it to be useful.
+
+
+dictionary.el
+-------------
+
+Our first client is an Emacs ([STALLMAN02]_, [STALLMAN81]_) extension written
+in Emacs' extension language, elisp [LEWIS02]_.  With good integration with the
+editor, this software allows a user to issue lookup command, search for
+matching words, hyperlinking of related words and is, as many modern extensions
+to Emacs are, very configurable.  It also provides non-interactive lookups that
+are triggered by mouse movement timeouts.  This of course demands either a
+local DICT server, or an extremely fast connection to the Internet, to be
+generally usable.
+
+Some thoughts about the design are warranted.  As most Emacs extensions, a lot
+of the design and actual code has gone into good integration with the editor.
+About a third of the code is directly related to Emacs and configuration.  When
+concentrating on integrating well with the environment one can easily forget to
+keep a clean interface to the functionality.  This can be seen in this
+software.  It would be very complicated to create a more general library and
+other possible clients from the code as it stands.  There has been no real
+separation between the protocol handling and the presentation layers.  (Which
+is too bad, since I could simply have ripped it otherwise ;-)  And, as there is
+no library, the commands defined are rather haphazardly combine various
+techniques to get their results.  There is thus no embedded language to even
+begin speaking of.
+
+
+dictd
+-----
+
+This is the DICT protocol authors own software, which is written in the 1989
+edition of ANSI C [ANSI89]_.  Included is a server and a client to the
+protocol.  A rundown of the client follows.
+
+To get down to the nitty and gritty, protocol commands are represented by a
+``struct cmd`` with a bunch of fields (a dozen, in fact) and protocol responses
+is likewise represented by a ``struct reply`` with even more fields (14).
+There are a bunch of functions for performing various tasks, such as calling a
+pager to display results, printing the actual results, sending the low-level
+textual commands, and so on.  All responses are interpreted by a function named
+``client_read_status``.  Commands are created by a function ``make_command``
+which takes a variable number of arguments and a command enum that specifies
+what command to create.  Then we have two functions ``request`` and ``process``
+that deal with sending out commands and handling responses.  An upside by this
+design is that chaining of commands (the process of sending multiple commands
+in one go and then reading all the expected responses) is straightforward.
+
+The problems with this design is that ``client_read_status`` has far too much
+responsibility.  It implicitly more or less performs the tasks of all
+commands.  Thus its parameter list is clumsy at best.  The design of
+``make_command`` is quite sane, as all commands can be treated equally once
+created (their all ``struct cmd``), but it forces the command type to be
+unnecessarily complex.  The design of ``request`` and ``process`` is very
+C:ish, as they do not actually take any arguments, dealing with global values
+instead.  Horrible, and so is their implementation, which feel unnecessarily
+complex and long-winded.  They too, take care of all possible commands and
+responses, which makes for large switch-statements.
+
+There has been no separation of a library and client in this software either,
+and everything is rather well intertwined.
+
+
+Other Implementations
+---------------------
+
+There are a bunch of other utilities that use the DICT protocol.  Most,
+however, are very limited in functionality and often integrated into something
+larger, such as IRC [RFC1459]_ clients or editors.
+
+
+
+Implementation
+==============
+
+
+The implementation implementation of a DICT protocol library that is the target
+of this paper has been written in the language Scheme [R5RS]_.  Specifically,
+the Guile [GALASSI03]_ implementation of it.  Guile seemed like a good choice,
+since it has good provisions for scripting, has a POSIX interface library, and
+a bunch of useful extensions.  It is also a project under the supervision of
+GNU, so, if nothing else, it is at least free ``:-)``.  
+
+The application consists of four parts, or modules, listed below, and followed
+by further discussion in succeeding sections.
+
+  * (util destructure) - provides destructuring macro
+  * (crypt md5) - provides md5 message digest algorithm
+  * (inet dict) - provides a DICT protocol library
+  * scheme-dict.scm - the client
+
+(util destructure)
+------------------
+
+Destructuring is a commonly applied idiom in Lisp.  It does not seem to have
+gotten as much use in Scheme for some reason unfamiliar to the author.  It
+proved useful, however, to have this functionality, especially when writing the
+`(crypt md5)`_ module.  It works by defining a macro that performs so called
+pattern matching on its input, binding input variable names to parts of other
+input values.  An example of its use (from the (crypt md5) module) is::
+
+ (destructure (((#(i0 i1 i2 i3) k s i) (car ops)))
+   ...)
+
+This example takes the car of ops and then splits it up into a vector, which is
+further split up into four variables, and three other variables.  This greatly
+simplifies the body (denoted by an ellipsis), where one would normally be
+forced to explicitly state the vector-ref's and taking the car and cdr of the
+list to retrieve each of the desired values.
+
+It works by recursively walking through the input lists and converting them to
+a let*-expression, where the vector-ref's and car/cdr's are finally made
+explicit.
+
+
+(crypt md5)
+-----------
+
+This module implements the MD5 message-digest algorithm [RFC1321]_.  It is used
+by the (inet dict) module to perform user authentication.
+
+The implementation of this module is quite straightforward.  It is more or less
+a straight translation of the algorithm described in [RFC1321]_ to Scheme code.
+
+As the MD5 algorithm works with 32-bit words, we first need to define some
+macros that perform integer calculations on 32-bit words (Guile uses larger
+integers normally) and also define the rotating-shift function (as a macro
+though) required by the algorithm::
+
+  (define-macro (word<<< n s)
+    `(+ (bit-extract ,n (- 32 ,s) 32) (mod32 (ash ,n ,s))))
+
+Following this, we define some auxiliary functions to perform word to and from
+bytes operations, so that it is possible to work with the individual 8-bit
+bytes of a 32-bit word and then piece them together.
+
+With these helper functions, we can begin defining the steps of the MD5
+algorithm, which again is more or less a simple translation of the
+specifications.  The most interesting part is step4-3, and specifically step4,
+as step3 is only an "initialization of registers", where we apply the four
+round-functions to the input.
+
+Defining each of these round-functions in isolation would be a pain, so they
+are all defined by preparing the various permutations required and creating
+macros for the actual functions.  Perhaps the most advanced function in the
+whole module is the function that actually applies the rounds functions and
+permutations (called (round)).
+
+The design of this library is a very straightforward translation of the MD5
+specification, which was, in part, possible thanks to the (destructure) macro
+and a couple of other macros written in the module.
+
+
+(inet dict)
+-----------
+
+This module defines the DICT protocol library used by the client application.
+It begins by setting up some globals containing protocol default values for
+connection port, database, and matching strategy.
+
+Following this initialization are perhaps the two most complex functions,
+(dict:read-line) and (split-line).  The first reads a line from the
+server connection socket, and the second splits such a line assumed to be a
+server response into its components.  The syntax for the components of such a
+response is well defined in the protocol specification.  Guile's regular
+expression facilities are used for matching components.  Then follows a couple
+more auxiliary functions, such as (read-response) which reads and splits a
+response from the server and (read-text) which reads a text response from the
+server, commonly returned for the definition of a word.  Then follows a couple
+more one-liners, dealing with responses and their components (called params in
+the code).  A function for raising errors is also included, so that a command
+can notify the utilizing client software that an unexpected condition has been
+met.
+
+Finally, we have come to the "real" functions of the library, the functions we
+are going to export, but first another macro.  The implementation of all but
+the (connect) command were greatly simplified by first writing a macro for
+defining commands::
+
+  (define-macro (command sock command args responses)
+    (let ((my-sock (gensym)))
+      `(let ((,my-sock ,sock))
+	(send-command ,my-sock ,command ,@args)
+	  (let ((response (read-response ,my-sock))) ;; so we can uses it later
+	    (case (response-code response)
+	      ,@responses
+	      (else (response-error response)))))))
+
+This sets up an alias for the input sock, as we need to use it twice and do not
+want it multiply evaluated, then will issue a (send-command) on the socket with
+the necessary parameters.  Then it will read the response and perform a (case)
+on it, using the handled responses provided, or if nothing matched, generating
+an error.
+
+An couple of example uses of the (command) macro, taken from the actual module
+follow::
+
+  (define (client sock id)
+    (command sock "CLIENT" (id) (((250) #t))))
+
+  (define* (lookup sock word #:optional (db dict:default-db))
+    (command sock "DEFINE" (db word) (((150) (read-definitions sock))
+				      ((552) '()))))
+  (define (databases sock)
+    (command sock "SHOW DB" () (((110) (read-list sock)) ((554) '()))))
+
+The first, (client), will send the string "CLIENT <id>" to the server and if
+the response has response-code 250, return successfully.
+
+The second, (lookup), which has an optional argument `db`, that defaults to the
+default database quite naturally, sends the string "DEFINE <db> <word>" to the
+server and if a response with response-code 150 is returned, reads the
+definitions that follow.  If the response-code is 552 instead, the server was
+unable to find any definitions for the word, which is not considered an error
+as such, so an empty list of definitions is instead returned.
+
+The third, (databases), sends the string "SHOW DB" to the server and on a 110
+response will read a list of database names and a short description of each.
+On a 554 code, the server had no databases to show, so an empty list is
+returned.  Any other error will then be handled by the implicit error return.
+
+
+scheme-dict.scm
+---------------
+
+This is the client application that uses (inet dict) to connect to DICT servers
+and look up definitions of words and so on.  Its command-line interface has
+been greatly influenced by that of dict in `dictd`_.  The Guile module
+(ice-9 getopt-long) is used to parse the command-line arguments, but with a
+twist.  (ice-9 getopt-long) is rather stupid and does not allow for any --help
+output and raises an error on invalid arguments.  This has been dealt with in
+two separate ways.  To allow for easy ``--help`` switch output, we define a
+variable ``*option-spec*``, which is a list of lists of option specifications.
+Each option specification is defined in the following manner::
+
+  (long-option character takes-argument arg-name help-string)
+
+This variable is then transformed into a format that the (getopt-long)
+function  from the (ice-9 getopt-long) module understands, and the same is true
+for the --help command-line switch handler.
+
+The second problem was that it raises an error when it encounters an unknown
+command-line argument.  This is handled by a (catch) function, which was
+previously only used to catch errors raised from (inet dict).  The error is
+then transformed into a more user-friendly error message and the application
+exits smoothly afterwards.
+
+To actually output anything, the client is itself responsible to present the
+received data to the user.  (inet dict) makes no such provisions, nor should
+it.  There are three data displaying functions, all utilizing (format) to
+output the data in a nicely formatted way.  Now, one way would of course to
+simply output the formatted data on (current-output-port) (standard out in most
+cases), but if the user has set up the ``PAGER`` environment variable, or
+specified one with the ``--pager`` command-line switch, this command will
+instead be invoked and the output redirected to it instead.  This means that
+the user can get all the output, which can sometimes be rather long, in a
+familiar paging application with ease.
+
+For many of the possible command-line switches, a specific DICT command will be
+executed to match the action requested.  This is usually straightforward, the
+only complex case being user authentication, where it is unknown if the server
+supports authentication before connecting, and the authentication may fail.
+(inet dict) assumes that the server supports authentication when the (auth)
+function is invoked, and returns a boolean stating if the authentication
+passed.  In the client, errors are thrown if neither of these conditions hold,
+so that they can be caught and dealt with properly.
+
+The use of the (inet dict) library is straightforward but not easily identified
+in the client, as most invocations are surrounded by command-line switch
+checking and (display-\*) functions to output the results.  This is an
+unavoidable complication when providing low-level functionality such as that
+provided by the library.  One wants to push as much upwards in the call-stack
+as possible, so as to not do anything unsuspected or unwanted, which leads to
+this kind of top-level code.
+
+
+Overall Design
+--------------
+
+No complex data structures where used, only lists and the odd vector.
+All the modules together consist of 20 macros, 40 top-level functions, and 20
+lambda expressions.  The code has been trimmed down to a mere 550 lines.
+Comparing this to the 1384 lines of ``dict.c`` of `dictd`_ which does not
+include an MD5 implementation, Scheme certainly feels like a good target
+language for an application such as this one.  To be fair, `dictionary.el`_
+totals 1589 lines, so using a Lisp dialect does not guarantee a simple, short,
+and straightforward implementation :-).
+
+
+
+Scheme versus Haskell
+=====================
+
+
+
+So how would an implementation of this library and client in Scheme differ from
+one written in Haskell [JONES03]_?  Quite a lot probably.  The general
+interface would probably not differ much.  The commands and their parameters
+are obvious from the specification, and thus the names and parameters of
+functions implementing these commands are more or less given.  Envisioning
+a Haskell implementation that uses Monads to deal with commands is possible,
+and do-notation to write small programs that performed the various tasks set
+out by the user.  It would probably be written as an embedded language with a
+run function that would take one of these commands and execute it (together
+with any following it) and checking for responses and so on.  How the user
+would specify the actions to take the author does not know.  Guessing, commands
+would take an extra parameter specifying some IO action to take on the output
+if there is any.  One issue would perhaps be error handling.  It would be a bit
+more complicated than in Scheme, though possible.
+
+Nothing in Scheme warrants giving any thought to choosing between a deep or
+shallow embedding, as we do not consider types in the same manner in Scheme as
+we do in Haskell.  Also, from an implementation viewpoint, we cannot start by
+specifying the type signatures of our interface and work from there.  As
+stated, though, this would not result in a much different design though, as
+most of the interface is easy to figure out from the protocol specification.
+
+To implement the client, which does a lot of IO and contains quite a
+bit of imperative-style code, is certainly more straightforward when you are
+not bound by the concept of purity that is enforced by Haskell.
+
+To end this chapter, it should be stated that macros are a wonderful thing, and
+they are something that are more or less only found in Lisp-dialects.  They can
+simplify the design and implementation of many kinds of problems and Lisp
+should be up for consideration as a target language for this reason alone on
+many projects.  Not only are they useful, they are entertaining to write and
+debug, though, the first is more entertaining than the other.
+
+
+
+Possible Enhancements
+=====================
+
+Software is never completed.  There is always room for enhancements.  As
+someone once stated:
+
+  "Every useful utility ends up becoming a Swiss Army Knife of Software"
+  
+While trying to avoid this, there is still room for some general enhancements,
+discussed in the following sections.
+
+
+Chaining of Commands
+--------------------
+
+This really speeds up the overall process.  With the current library design,
+there is no simple way to deal with this.  One solution would be to create a
+new construct, perhaps called ``chain``, by way of a macro would take a list of
+commands and transform them into a chained representation.  The handling of
+response codes would be complicated some, but it would be manageable.
+
+
+Support for /etc/dictd/dict.conf
+--------------------------------
+
+`dictd`_ allows for configuration through the file mentioned in the title of
+this section, and using this would be valuable to this implementation as well,
+to allow for easy substitution.
+
+
+Support for ~/.netrc
+--------------------
+
+It would be good to allow users to specify authentication information in the
+standard location, namely ``~/.netrc``, so as to better integrate with the UNIX
+environment.
+
+
+Interactive Client
+------------------
+
+A possible enhancement, or more of a "tool" on the imagined Swiss Army Knife,
+would be to implement an interactive mode, which would allow the user to issue
+commands interactively, using a readline interface.  This does not have many
+real uses, but could be somewhat nice-to-have from time to time.
+
+
+Implement SASLAUTH
+------------------
+
+There is an experimental command in the protocol, named SASLAUTH, that uses
+SASL [RFC2222]_ for user authentication.  No servers seem to implement this
+command though, so may be a waste of time.
+
+
+Re-implementation in highly-optimized C
+---------------------------------------
+
+Only kidding.
+
+
+
+Glossary
+========
+
+
+A Glossary should not really be required, as one can simply look up the meaning
+of any unfamiliar word using the software described in this paper.  For
+completeness, though, here is a short glossary of some of the terms used
+previously (and even never before).
+
+API
+  Application Programming Interface.  The interface provided to programmers for
+  an application.
+
+GNU
+  GNU's Not UNIX.  An operating system envisioned by software freedom fighter
+  Richard M. Stallman, which implements the POSIX specification but still lacks
+  a good kernel some say.
+
+Guile
+  GNU's Ubiquitous Intelligent Language for Extensions.  An implementation of
+  the Scheme programming language to be used mainly as an extension language to
+  software developed for the GNU operating system.
+
+KISS
+  Keep It Simple, Stupid, or, its friendlier translation, Keep It Simple,
+  Silly.  Exaggeratively, a methodology of developing software, where one tries
+  to abide to one of Albert Einsteins sayings: "Everything should be made as
+  simple as possible, but not simpler."
+
+Multics
+  MULTiplexed Information and Computing Service.  An operating system developed
+  at Bell Labs that never saw the light of day.
+
+POSIX
+  Portable Operating System for unIX.  The smallest common denominator of 
+  unices, defining API's to the system and commands that make up a UNIX System.
+
+UNIX
+  An operating system originally written by Ken Thompson and later Dennis
+  Ritchie and others at, what was then, Bell Labs, after the failed Multics
+  operating system was abandoned.
+
+
+Bibliography
+============
+
+
+
+.. [ANSI89] ANSI X3.159 Committee, "ANSI X3.159-1989: Programming Language -
+   C", American National Standards Institute (1989)
+
+.. [JONES03] Simon Peyton Jones, "Haskell 98 Language and Libraries", Cambridge
+   University Press 0-521826-14-4 (Apr 2003)
+
+.. [GALASSI03] Mark Galassi, Jim Blandy, Gary Houston, Tim Pierce, Neil Jerram,
+   Martin Grabmueller, "Guile Reference Manual", ed. 1.0 (Dec 2003),
+   http://www.gnu.org/software/guile/docs/guile-ref/
+
+.. [LEWIS02] Bil Lewis, Dan LaLiberte, Richard Stallman, "GNU Emacs Lisp
+   Reference Manual", The Free Software Foundation 1-882114-73-6, rev. 2.8,
+   (Jan 2002), http://www.gnu.org/software/emacs/elisp-manual/
+
+.. [R5RS] R. Kelsey, W. Clinger, J. Rees (eds.), "Revised^5 Report on the
+   Algorithmic Language Scheme", Higher-Order and Symbolic Computation, vol.
+   11, no. 1, (Aug 1998), http://www.schemers.org/Documents/Standards/R5RS/
+
+.. [RFC1321] R. Rivest, "The MD5 Message-Digest Algorithm", Network Working
+   Group, Request for Comments: 1321 (Apr 1992)
+
+.. [RFC1459] J. Oikarinen, D. Reed, "Internet Relay Chat Protocol", Network
+   Working Group, Request for Comments: 1459 (May 1993)
+
+.. [RFC2222] J. Myers, "Simple Authentication and Security Layer (SASL",
+   Network Working Group, Request for Comments: 2222 (Oct 1997)
+
+.. [RFC2229] R. Faith, B. Martin, "A Dictionary Server Protocol", Network
+   Working Group, Request for Commments: 2229 (Oct 1997)
+
+.. [STALLMAN81] Richard M. Stallman, "EMACS: The Extensible, Customizable
+   Display Editor", Proceedings of the ACM SIGPLAN/SIGOA Symposium on Text
+   Manipulation Notices, vol. 16, pp. 147-156 (1981),
+   http://www.gnu.org/software/emacs/emacs-paper.html
+
+.. [STALLMAN02] Richard Stallman, "GNU Emacs Manual", Free Software Foundation
+   1-882114-06-X, ed. 14 (Mar 2002),
+   http://www.gnu.org/software/emacs/manual/

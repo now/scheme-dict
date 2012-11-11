@@ -1,0 +1,192 @@
+#! @GUILE@ \
+-e main -s
+!#
+
+(use-modules (inet dict)
+	     (util destructure)
+	     (ice-9 format)
+	     (ice-9 getopt-long)
+	     (ice-9 optargs)
+	     (ice-9 popen)
+	     (ice-9 receive)
+	     (ice-9 syncase)
+	     (srfi srfi-1)
+	     (srfi srfi-13))
+
+(define-syntax unless
+  (syntax-rules ()
+    ((_ test body ...) (if (not test) (begin body ...))))) 
+
+(define *application-name* "@PACKAGE_NAME@")
+(define *application-version* "@PACKAGE_VERSION@")
+(define *client-string*
+  (let ((arch (uname)))
+    (format "~A ~A on ~A ~A"
+	    *application-name* *application-version*
+	    (utsname:sysname arch) (utsname:release arch))))
+(define *default-server* "dict.org")
+
+(define *option-spec*
+  '((host 	#\h #t "HOST"	"host DICT server")
+    (port	#\p #t "PORT"	"port to use")
+    (database 	#\d #t "DB"	"database to check")
+    (match	#\m #f #f	"find matching words")
+    (strategy	#\s #t "STRAT"	"strategy for matching words")
+    (config	#\c #t "FILE"	"configuration file to read")
+    (nocorrect	#\C #f #f	"don't try to correct spelling")
+    (dbs	#\D #f #f	"list available databases")
+    (strats	#\S #f #f	"list available match strategies")
+    (serverhelp	#\H #f #f	"show server specific help")
+    (info	#\i #f #f	"show information on selected database")
+    (serverinfo	#\I #f #f	"show information on selected server")
+    (noauth	#\a #f #f	"don't try to authenticate")
+    (user	#\u #t "USER"	"user to authenticate as")
+    (key	#\k #t "PASS"	"password to authenticate with")
+    (version	#\V #f #f	"display version string")
+    (license	#\L #f #f	"display software license")
+    (help	#f  #f #f	"display this help")
+    (verbose	#\v #f #f	"be verbose with output")
+    (raw	#\r #f #f	"show raw transmissions")
+    (pager	#\p #t "PROG"	"specify program to use as pager")
+    (client	#f  #t "STRING"	"client-string to use when connecting")))
+
+(define* (display-text text #:optional (indent 0))
+  (map (lambda (line)
+	 (format #t "~vT~A~%" indent line))
+       (string-split
+	 (string-trim-right text
+			    (lambda (c) (member c '(#\cr #\nl #\space #\ht))))
+	 #\nl)))
+
+(define (display-definitions definitions word)
+  (if (null? definitions)
+    (format #t "No definitions found for `~A'" word)
+    (begin
+      (format #t "~D definitions found~%" (length definitions))
+      (map (lambda (d)
+	     (format #t "~%From ~A [~A]:~2%" (cadr d) (car d))
+	     (display-text (caddr d) 2))
+	   definitions))))
+
+(define (display-list list desc)
+  (if (null? list)
+    (format #t "No ~A" desc)
+    (let ((longest (reduce (lambda (a b)
+			     (max (string-length (car a)) b)) 0 list)))
+      (format #t "~@(~A~):~%" desc)
+      (map (lambda (s) (format #t "~2T~vA  ~A~%" longest (car s) (cadr s)))
+	   list))))
+
+;; could also write an interactive client
+;; and check ~/.netrc for logins and so on
+
+;; TODO: we should exit cleanly, closing connections and such
+;; how about dynamic-wind?
+(define (main args)
+  (catch #t
+    (lambda ()
+      (let* ((options (getopt-long args
+				   (map (lambda (opt)
+					  (destructure (((l s v n h) opt))
+					   (if s
+					     `(,l (single-char ,s) (value ,v))
+					     `(,l (value ,v)))))
+					*option-spec*)))
+	     (host 		(option-ref options 'host *default-server*))
+	     (port 		(option-ref options 'port dict:default-port))
+	     (database 		(option-ref options 'database dict:default-db))
+	     (use-match?	(option-ref options 'match #f))
+	     (strategy		(option-ref options
+					    'strategy
+					    dict:default-strategy))
+	     (config		(option-ref options 'config "~/.dictrc"))
+	     (no-correct?	(option-ref options 'nocorrect #f))
+	     (list-dbs?		(option-ref options 'dbs #f))
+	     (list-strats?	(option-ref options 'strats #f))
+	     (serverhelp?	(option-ref options 'serverhelp #f))
+	     (dbinfo?		(option-ref options 'info #f))
+	     (serverinfo?	(option-ref options 'serverinfo #f))
+	     (send-auth?	(option-ref options 'noauth #t))
+	     (username		(option-ref options 'user #f))
+	     (password		(option-ref options 'key #f))
+	     (show-version?	(option-ref options 'version #f))
+	     (show-help?	(option-ref options 'help #f))
+	     (be-verbose?	(option-ref options 'verbose #f))
+	     (show-raw?		(option-ref options 'raw #f))
+	     (pager		(option-ref options
+					    'pager
+					    (or (getenv "PAGER") "-")))
+	     (client-string	(option-ref options 
+					    'client
+					    *application-name*))
+	     (words		(option-ref options '() '())))
+	(if (or show-version? show-help?)
+	  (begin
+	    (if show-version?
+	      (format #t "~A version ~A~%"
+		      *application-name*
+		      *application-version*))
+	    (if show-help?
+	      (begin
+		(format #t "Usage: ~A [OPTION]... WORD...~%" *application-name*)
+		(map (lambda (opt) 
+		       (destructure (((l s v n h) opt))
+			 (format #t "~:[~3T~1*~;-~C,~] ~
+				 ~@[--~A~]~:[~1*~;=~A~]~26T~A~%"
+				 s s l v n h)))
+		     *option-spec*))))
+	  (begin
+	    (if (not (or list-dbs? list-strats? serverhelp? dbinfo?
+			 serverinfo? (not (null? words))))
+	      (throw 'opt-error (format "missing word arguments~@
+				 	 Try `~A --help' for more information"
+					 *application-name*) 1))
+	    (receive (sock caps msg-id) (connect host port)
+	      (client sock client-string)
+	      (if (and username password send-auth?)
+		(if (can-auth? caps)
+		  (if (not (auth sock username password msg-id))
+		    (throw 'dict-error "user authentication failed"))
+		  (throw 'dict-error "server does not support authentication")))
+	      (unless (string=? pager "-")
+		(set-current-output-port (open-output-pipe pager)))
+	      (cond
+		(list-dbs?	(display-list (databases sock)
+					      "databases present"))
+		(list-strats? 	(display-list (strategies sock)
+					      "strategies available"))
+		(serverhelp?	(display-text (help sock)))
+		(dbinfo?	(display-text (info sock database)))
+		(serverinfo?	(display-text (server sock)))
+		(else
+		  (map (lambda (word)
+			 (if use-match?
+			   (display-list (match sock word database strategy)
+					 "matches found")
+			   (let ((defs (lookup sock word database)))
+			     (if (and (null? defs) (not no-correct?))
+			       (display-list
+				 (match sock word database
+					dict:default-strategy)
+				 (format "possible spelling corrections ~
+				 	  for `~A'" word))
+			       (display-definitions defs word)))))
+		       words)))
+	      (dict:quit sock)
+	      (disconnect sock)
+	      (unless (string=? pager "-")
+		(close-pipe (current-output-port))))))))
+    (lambda (key . args)
+      (case key
+	((dict-error opt-error) (format #t "~A: ~A~%"
+					*application-name*
+					(car args))
+				(exit 2))
+	((misc-error) 		(format #t "~A: ~?~%"
+					*application-name*
+					(cadr args)
+					(caddr args))
+				(exit 1))
+	(else			(apply throw key args))))))
+
+;;; vim: ft=scheme
